@@ -320,17 +320,17 @@ void PairNEQUIP::compute(int eflag, int vflag){
   // Total number of bonds (sum of number of neighbors)
   int nedges = std::accumulate(numneigh, numneigh+ntotal, 0);
 
-  torch::Tensor pos_tensor = torch::zeros({nlocal, 3});
+  torch::Tensor pos_tensor = torch::zeros({nlocal, 3}, torch::TensorOptions().dtype(torch::kFloat64));
   torch::Tensor tag2type_tensor = torch::zeros({nlocal}, torch::TensorOptions().dtype(torch::kInt64));
-  torch::Tensor periodic_shift_tensor = torch::zeros({3});
-  torch::Tensor cell_tensor = torch::zeros({3,3});
+  torch::Tensor periodic_shift_tensor = torch::zeros({3}, torch::TensorOptions().dtype(torch::kFloat64));
+  torch::Tensor cell_tensor = torch::zeros({3,3}, torch::TensorOptions().dtype(torch::kFloat64));
 
-  auto pos = pos_tensor.accessor<float, 2>();
+  auto pos = pos_tensor.accessor<double, 2>();
   long edges[2*nedges];
-  float edge_cell_shifts[3*nedges];
+  double edge_cell_shifts[3*nedges];
   auto tag2type = tag2type_tensor.accessor<long, 1>();
-  auto periodic_shift = periodic_shift_tensor.accessor<float, 1>();
-  auto cell = cell_tensor.accessor<float,2>();
+  auto periodic_shift = periodic_shift_tensor.accessor<double, 1>();
+  auto cell = cell_tensor.accessor<double,2>();
 
   // Inverse mapping from tag to "real" atom index
   std::vector<int> tag2i(inum);
@@ -401,8 +401,8 @@ void PairNEQUIP::compute(int eflag, int vflag){
       double rsq = dx*dx + dy*dy + dz*dz;
       if (rsq < cutoff*cutoff){
           torch::Tensor cell_shift_tensor = cell_inv.matmul(periodic_shift_tensor);
-          auto cell_shift = cell_shift_tensor.accessor<float, 1>();
-          float * e_vec = &edge_cell_shifts[edge_counter*3];
+          auto cell_shift = cell_shift_tensor.accessor<double, 1>();
+          double * e_vec = &edge_cell_shifts[edge_counter*3];
           e_vec[0] = std::round(cell_shift[0]);
           e_vec[1] = std::round(cell_shift[1]);
           e_vec[2] = std::round(cell_shift[2]);
@@ -426,16 +426,16 @@ void PairNEQUIP::compute(int eflag, int vflag){
 
   // shorten the list before sending to nequip
   torch::Tensor edges_tensor = torch::zeros({2,edge_counter}, torch::TensorOptions().dtype(torch::kInt64));
-  torch::Tensor edge_cell_shifts_tensor = torch::zeros({edge_counter,3});
+  torch::Tensor edge_cell_shifts_tensor = torch::zeros({edge_counter,3}, torch::TensorOptions().dtype(torch::kFloat64));
   auto new_edges = edges_tensor.accessor<long, 2>();
-  auto new_edge_cell_shifts = edge_cell_shifts_tensor.accessor<float, 2>();
+  auto new_edge_cell_shifts = edge_cell_shifts_tensor.accessor<double, 2>();
   for (int i=0; i<edge_counter; i++){
 
       long *e=&edges[i*2];
       new_edges[0][i] = e[0];
       new_edges[1][i] = e[1];
 
-      float *ev = &edge_cell_shifts[i*3];
+      double *ev = &edge_cell_shifts[i*3];
       new_edge_cell_shifts[i][0] = ev[0];
       new_edge_cell_shifts[i][1] = ev[1];
       new_edge_cell_shifts[i][2] = ev[2];
@@ -463,16 +463,16 @@ void PairNEQUIP::compute(int eflag, int vflag){
   auto output = model.forward(input_vector).toGenericDict();
 
   torch::Tensor forces_tensor = output.at("forces").toTensor().cpu();
-  auto forces = forces_tensor.accessor<float, 2>();
+  auto forces = forces_tensor.accessor<double, 2>();
 
   torch::Tensor total_energy_tensor = output.at("total_energy").toTensor().cpu();
 
   // store the total energy where LAMMPS wants it
-  eng_vdwl = total_energy_tensor.data_ptr<float>()[0];
+  eng_vdwl = total_energy_tensor.data_ptr<double>()[0];
 
   torch::Tensor atomic_energy_tensor = output.at("atomic_energy").toTensor().cpu();
-  auto atomic_energies = atomic_energy_tensor.accessor<float, 2>();
-  float atomic_energy_sum = atomic_energy_tensor.sum().data_ptr<float>()[0];
+  auto atomic_energies = atomic_energy_tensor.accessor<double, 2>();
+  double atomic_energy_sum = atomic_energy_tensor.sum().data_ptr<double>()[0];
 
   if(debug_mode){
     std::cout << "NequIP model output:\n";
