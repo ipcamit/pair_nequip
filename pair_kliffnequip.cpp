@@ -28,6 +28,8 @@
 #include "potential_file_reader.h"
 #include "tokenizer.h"
 
+#include <tuple>
+#include <unordered_set>
 #include <cmath>
 #include <cstring>
 #include <numeric>
@@ -38,8 +40,38 @@
 #include <torch/torch.h>
 #include <torch/script.h>
 #include <torch/csrc/jit/runtime/graph_executor.h>
+#include <functional>
 //#include <c10/cuda/CUDACachingAllocator.h>
 
+// Cantor pairing class for hashing two int tuple
+// https://en.wikipedia.org/wiki/Pairing_function#Cantor_pairing_function
+// https://stackoverflow.com/questions/919612/mapping-two-integers-to-one-in-a-unique-and-deterministic-way
+class CantorPairing {
+public:
+
+  int64_t operator()(const std::array<long,2> &t) const {
+    int64_t k1 = t[0];
+    int64_t k2 = t[1];
+    // incr to avoid 0
+    k1++;
+    k2++;
+    return (k1 + k2) * (k1 + k2 + 1) / 2 + k1;
+  }
+};
+
+// https://arxiv.org/pdf/2105.10752.pdf
+class SymmetricCantorPairing {
+public:
+
+  int64_t operator()(const std::array<long,2> &t) const {
+    int64_t k1 = t[0];
+    int64_t k2 = t[1];
+    int64_t kmin = std::min(k1, k2);
+    int64_t ksum = k1 + k2 + 1;
+
+    return 0.25 *(ksum * ksum - ksum%2) + kmin;
+  }
+};
 
 using namespace LAMMPS_NS;
 
@@ -286,57 +318,117 @@ void PairKLIFFNEQUIP::compute(int eflag, int vflag){
   torch::Tensor pos_tensor = torch::from_blob(x[0], {ntotal, 3}, torch::TensorOptions().dtype(torch::kFloat64).requires_grad(true));
   pos_tensor.retain_grad();
     std::vector<torch::IValue> input_vector(6);
-  
-    int n_layers = 3; // TODO: make this an input
-    std::tuple<int, int> bond_pair, rev_bond_pair;
-    std::vector<std::set<std::tuple<long, long> > > unrolled_graph(n_layers);
-    std::vector<int> next_list, prev_list;
 
+    std::function<int(std::array<long,2>)> get_hash = [&ntotal](std::array<long,2> edge) {
+        long i = edge[0];
+        long j = edge[1];
+        return i * ntotal + j;
+    };
+    int n_layers = 3; // TODO: make this an input
+    std::array<long, 2> bond_pair, rev_bond_pair;
+    //std::vector<std::unordered_set<std::array<long,2>, CantorPairing> > unrolled_graph(n_layers);
+    //std::vector<std::unordered_set<std::array<long,2>, CantorPairing> > unrolled_graph(n_layers);
+    int comparisons = 0;
+    //std::vector<int> next_list, prev_list;
+    double _x, _y , _z;
     double cutoff_sq = 4.0 * 4.0;//cutoff * cutoff; // TODO: make this an input
-    for (int atom_i = 0; atom_i < nlocal; atom_i++) {
-        prev_list.push_back(atom_i);
-        for (int i = 0; i < n_layers; i++) {
-            if (!prev_list.empty()) {
-                do {
-                    int curr_atom = prev_list.back();
-                    prev_list.pop_back();
-                    int numberOfNeighbors = numneigh[curr_atom];
-                    for (int j = 0; j < numberOfNeighbors; j++) {
-                        if ((std::pow(x[curr_atom][0] - x[firstneigh[curr_atom][j]][0], 2) +
-                             std::pow(x[curr_atom][1] - x[firstneigh[curr_atom][j]][1], 2) +
-                             std::pow(x[curr_atom][2] - x[firstneigh[curr_atom][j]][2], 2))
-                            <= cutoff_sq) {
-                            bond_pair = std::make_tuple(curr_atom, firstneigh[curr_atom][j]);
-                            rev_bond_pair = std::make_tuple(firstneigh[curr_atom][j], curr_atom);
-                            unrolled_graph[i].insert(bond_pair);
-                            unrolled_graph[i].insert(rev_bond_pair);
-                            next_list.push_back((firstneigh[curr_atom][j]));
-                        }
-                    }
-                } while (!prev_list.empty());
-                prev_list.swap(next_list);
+//    for (int atom_i = 0; atom_i < nlocal; atom_i++) {
+//        prev_list.push_back(atom_i);
+//        for (int i = 0; i < n_layers; i++) {
+//            if (!prev_list.empty()) {
+//                do {
+//                    int curr_atom = prev_list.back();
+//                    prev_list.pop_back();
+//                    int numberOfNeighbors = numneigh[curr_atom];
+//                    for (int j = 0; j < numberOfNeighbors; j++) {
+//                        _x = x[curr_atom][0] - x[firstneigh[curr_atom][j]][0];
+//                        _y = x[curr_atom][1] - x[firstneigh[curr_atom][j]][1];
+//                        _z = x[curr_atom][2] - x[firstneigh[curr_atom][j]][2];
+//                        comparisons++;
+//                        if ((_x * _x + _y * _y + _z * _z) <= cutoff_sq) {
+//                            bond_pair = {curr_atom, firstneigh[curr_atom][j]};
+//                            rev_bond_pair = {firstneigh[curr_atom][j], curr_atom};
+//                            unrolled_graph[i].insert(bond_pair);
+//                            unrolled_graph[i].insert(rev_bond_pair);
+//                            next_list.push_back((firstneigh[curr_atom][j]));
+//                        }
+//                    }
+//                } while (!prev_list.empty());
+//                prev_list.swap(next_list);
+//            }
+//        }
+//        prev_list.clear();
+//    }
+//    for (int atom_i = 0; atom_i < nlocal; atom_i++) {
+//        int numberOfNeighbors = numneigh[atom_i];
+//        for (int j = 0; j < numberOfNeighbors; j++) {
+//            int atom_j = firstneigh[atom_i][j];
+//            _x = x[atom_i][0] - x[atom_j][0];
+//            _y = x[atom_i][1] - x[atom_j][1];
+//            _z = x[atom_i][2] - x[atom_j][2];
+//            comparisons++;
+//            double r_sq = _x * _x + _y * _y + _z * _z;
+//            int bin = static_cast<int>(std::floor(r_sq)/cutoff_sq);
+//
+//            if (bin < n_layers) {
+//                bond_pair = {atom_i, atom_j};
+//                rev_bond_pair = {atom_j, atom_i};
+//                unrolled_graph[bin].insert(bond_pair);
+//                unrolled_graph[bin].insert(rev_bond_pair);
+//            }
+//        }
+//    }
+
+    std::unordered_set<int> atoms_in_layers;
+    std::vector<std::unordered_set<std::array<long,2>, SymmetricCantorPairing>> unrolled_graph(n_layers);
+
+    for (int i = 0; i < nlocal; i++){
+        atoms_in_layers.insert(i);
+    }
+    
+    std::array<double, 3> i_arr, j_arr;
+    int ii = 0;
+    do {
+        std::unordered_set<int> atoms_in_next_layer;
+        for (int atom_i : atoms_in_layers) {
+            int numberOfNeighbors = numneigh[atom_i];
+            for (int j = 0; j < numberOfNeighbors; j++) {
+                int atom_j = firstneigh[atom_i][j];
+                std::memcpy(i_arr.data(), x[atom_i], 3 * sizeof(double));
+                std::memcpy(j_arr.data(), x[atom_j], 3 * sizeof(double));
+                _x = i_arr[0] - j_arr[0];
+                _y = i_arr[1] - j_arr[1];
+                _z = i_arr[2] - j_arr[2];
+                double r_sq = _x * _x + _y * _y + _z * _z;
+                if (r_sq <= cutoff_sq) {
+                    unrolled_graph[ii].insert({atom_i, atom_j});
+                    atoms_in_next_layer.insert(atom_j);
+                }
             }
         }
-        prev_list.clear();
-    }
+        atoms_in_layers = atoms_in_next_layer;
+        ii++;
+    } while (ii < n_layers);
 
     long **graph_edge_indices = new long *[n_layers];
     int iii = 0;
     for (auto const &edge_index_set: unrolled_graph) {
         int jjj = 0;
-        int graph_size = static_cast<int>(edge_index_set.size());
+        int single_graph_size = static_cast<int>(edge_index_set.size());
         // Sanitize previous graph
-        graph_edge_indices[iii] = new long[graph_size * 2];
+        graph_edge_indices[iii] = new long[single_graph_size * 4];
         for (auto bond_pair: edge_index_set) {
             graph_edge_indices[iii][jjj] = std::get<0>(bond_pair);
-            graph_edge_indices[iii][jjj + graph_size] = std::get<1>(bond_pair);
+            graph_edge_indices[iii][jjj + 2 * single_graph_size] = std::get<1>(bond_pair);
             jjj++;
         }
+        std::memcpy(graph_edge_indices[iii] + single_graph_size, graph_edge_indices[iii] + 2 * single_graph_size,single_graph_size * sizeof(long));
+        std::memcpy(graph_edge_indices[iii] + 3 * single_graph_size, graph_edge_indices[iii], single_graph_size * sizeof(long));
         iii++;
     }
 
-
     
+  int edge_sizes[3] = {unrolled_graph[0].size(), unrolled_graph[1].size(), unrolled_graph[2].size()};
     int64_t * contraction_array = new int64_t[ntotal];
     for (int i = 0; i < ntotal; i++) {
         contraction_array[i] = (i < nlocal) ? 0 : 1;
@@ -349,17 +441,16 @@ void PairKLIFFNEQUIP::compute(int eflag, int vflag){
     
     torch::Tensor contraction_tensor = torch::from_blob(contraction_array, {ntotal}, torch::TensorOptions().dtype(torch::kInt64));
     torch::Tensor species_tensor = torch::from_blob(species_atomic_number, {ntotal}, torch::TensorOptions().dtype(torch::kInt64));
-    torch::Tensor edge_index0 = torch::from_blob(graph_edge_indices[0], {2, unrolled_graph[0].size()}, torch::TensorOptions().dtype(torch::kInt64));
-    torch::Tensor edge_index1 = torch::from_blob(graph_edge_indices[1], {2, unrolled_graph[1].size()}, torch::TensorOptions().dtype(torch::kInt64));
-    torch::Tensor edge_index2 = torch::from_blob(graph_edge_indices[2], {2, unrolled_graph[2].size()}, torch::TensorOptions().dtype(torch::kInt64));
-
+    torch::Tensor edge_index0 = torch::from_blob(graph_edge_indices[0], {2, edge_sizes[0]}, torch::TensorOptions().dtype(torch::kInt64));
+    torch::Tensor edge_index1 = torch::from_blob(graph_edge_indices[1], {2, edge_sizes[1]}, torch::TensorOptions().dtype(torch::kInt64));
+    torch::Tensor edge_index2 = torch::from_blob(graph_edge_indices[2], {2, edge_sizes[2]}, torch::TensorOptions().dtype(torch::kInt64));
+    
     input_vector[0] = species_tensor.to(device);
     input_vector[1] = pos_tensor.to(device);
     input_vector[2] = edge_index0.to(device);
     input_vector[3] = edge_index1.to(device);
     input_vector[4] = edge_index2.to(device);
     input_vector[5] = contraction_tensor.to(device);
-        
   auto output = model.forward(input_vector).toTuple()->elements();
 
   torch::Tensor forces_tensor = output[1].toTensor().cpu();
@@ -394,6 +485,7 @@ void PairKLIFFNEQUIP::compute(int eflag, int vflag){
   for (int i = 0; i < n_layers; i++) {
     delete[] graph_edge_indices[i];
   }
+  delete[] graph_edge_indices;
   delete[] contraction_array;
   delete[] species_atomic_number;
 }
