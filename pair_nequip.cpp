@@ -27,6 +27,7 @@
 #include "neighbor.h"
 #include "potential_file_reader.h"
 #include "tokenizer.h"
+#include "pair.h"
 
 #include <cmath>
 #include <cstring>
@@ -497,7 +498,8 @@ void PairNEQUIP::compute(int eflag, int vflag){
   }
 
   // TODO: Virial stuff? (If there even is a pairwise force concept here)
-
+    if (vflag_global)
+        virial_fdotr_compute();
   // TODO: Performance: Depending on how the graph network works, using tags for edges may lead to shitty memory access patterns and performance.
   // It may be better to first create tag2i as a separate loop, then set edges[edge_counter][:] = (i, tag2i[jtag]).
   // Then use forces(i,0) instead of forces(itag,0).
